@@ -1,200 +1,140 @@
 cd /root/ip555-org-vps
-cat << 'EOF' > scan_folder_candidates.js
+cat << 'EOF' > auto_redbg_scan_nodejs.js
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 const Database = require('better-sqlite3');
 
-const SCAN_DIR = process.env.SCAN_DIR || '/root/ip555-org-vps/SCAN/SCAN';
-const TARGET_DPS_ID = process.env.TARGET_DPS_ID || 'dps_13';
-const APPLY = process.env.APPLY === '1';
-const CLEAN_PREV = process.env.CLEAN_PREV === '1';
+const DATA_DIR = '/root/ip555-org-vps/public/datadiri';
+const DB_PATH = '/root/ip555-org-vps/data/ip555.db';
 
-if (!fs.existsSync(SCAN_DIR)) {
-  console.error('FOLDER_TIDAK_DITEMUKAN:', SCAN_DIR);
+if (!fs.existsSync(DATA_DIR)) {
+  console.error('FOLDER_DATADIRI_TIDAK_DITEMUKAN:', DATA_DIR);
   process.exit(1);
 }
 
-function parseCandidateFile(filename) {
-  const ext = path.extname(filename);
-  const base = path.basename(filename, ext);
+// Cek ketersediaan sharp di Node.js atau ffmpeg di sistem
+let hasSharp = false;
+try {
+  require.resolve('sharp');
+  hasSharp = true;
+} catch (_) {}
 
-  // Cocokkan pola: "<NAMA> (1)" atau "<NAMA>(1)" untuk pas foto, dan "(2)" untuk KTP
-  const m1 = base.match(/^(.*?)\s*\(\s*1\s*\)\s*$/);
-  if (m1) {
-    const nama = m1[1].replace(/\s+/g, ' ').trim().toUpperCase();
-    return { nama, slot: 'pas_foto', matchedPattern: true };
-  }
+let hasFfmpeg = false;
+try {
+  execSync('command -v ffmpeg', { stdio: 'ignore' });
+  hasFfmpeg = true;
+} catch (_) {}
 
-  const m2 = base.match(/^(.*?)\s*\(\s*2\s*\)\s*$/);
-  if (m2) {
-    const nama = m2[1].replace(/\s+/g, ' ').trim().toUpperCase();
-    return { nama, slot: 'foto_ktp', matchedPattern: true };
-  }
+let hasConvert = false;
+try {
+  execSync('command -v convert', { stdio: 'ignore' });
+  hasConvert = true;
+} catch (_) {}
 
-  const cleanNama = base
-    .replace(/\s*\(\s*\d+\s*\)\s*$/, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toUpperCase();
+console.log('NODE_TOOLS:', { hasSharp, hasFfmpeg, hasConvert });
 
-  return { nama: cleanNama, slot: 'other', matchedPattern: false };
-}
-
-function walkFiles(dir) {
-  let out = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name.startsWith('__MACOSX') || entry.name.startsWith('.')) continue;
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out = out.concat(walkFiles(full));
-    else if (/\.(jpe?g|png|webp)$/i.test(entry.name)) out.push(full);
-  }
-  return out;
-}
-
-const files = walkFiles(SCAN_DIR);
-const groups = new Map();
-const extraOrUnmatched = [];
-
-for (const f of files) {
-  const rel = path.relative(SCAN_DIR, f);
-  const parts = rel.split(path.sep);
-  const folderName = parts.length > 1 ? parts[0] : 'ROOT';
-  const parsed = parseCandidateFile(f);
-  if (!parsed.nama) continue;
-
-  const key = `${folderName}::${parsed.nama}`;
-  if (!groups.has(key)) {
-    groups.set(key, {
-      nama: parsed.nama,
-      folder: folderName,
-      pas_foto_files: [],
-      foto_ktp_files: [],
-      other_files: []
-    });
-  }
-  const g = groups.get(key);
-  if (parsed.slot === 'pas_foto') g.pas_foto_files.push(f);
-  else if (parsed.slot === 'foto_ktp') g.foto_ktp_files.push(f);
-  else g.other_files.push(f);
-}
-
-const validPairs = [];
-const incompletePairs = [];
-
-for (const g of groups.values()) {
-  const hasFoto = g.pas_foto_files.length > 0;
-  const hasKtp = g.foto_ktp_files.length > 0;
-
-  if (g.pas_foto_files.length > 1 || g.foto_ktp_files.length > 1 || g.other_files.length > 0) {
-    extraOrUnmatched.push({
-      nama: g.nama,
-      folder: g.folder,
-      foto1Count: g.pas_foto_files.length,
-      ktp2Count: g.foto_ktp_files.length,
-      extraCount: g.other_files.length + Math.max(0, g.pas_foto_files.length - 1) + Math.max(0, g.foto_ktp_files.length - 1)
-    });
-  }
-
-  if (hasFoto && hasKtp) {
-    validPairs.push({
-      nama: g.nama,
-      folder: g.folder,
-      pas_foto_src: g.pas_foto_files[0],
-      foto_ktp_src: g.foto_ktp_files[0]
-    });
-  } else {
-    incompletePairs.push({
-      nama: g.nama,
-      folder: g.folder,
-      hasFoto1: hasFoto,
-      hasKtp2: hasKtp,
-      otherCount: g.other_files.length
-    });
-  }
-}
-
-console.log('SCAN_DIR:', SCAN_DIR);
-console.log('TARGET_DPS:', TARGET_DPS_ID, '(DPS Kranggan)');
-console.log('TOTAL_FILE_GAMBAR:', files.length);
-console.log('TOTAL_ORANG_VALID_ADA_(1)_DAN_(2):', validPairs.length);
-console.log('TIDAK_LENGKAP_(1)_ATAU_(2):', incompletePairs.length);
-if (incompletePairs.length > 0) {
-  console.log('CONTOH_TIDAK_LENGKAP:', incompletePairs.slice(0, 15));
-}
-console.log('NAMA_DENGAN_FILE_LEBIH_DARI_PASANGAN_(1)+(2):', extraOrUnmatched.length);
-if (extraOrUnmatched.length > 0) {
-  console.log('CONTOH_FILE_LEBIH_DARI_PASANGAN:', extraOrUnmatched.slice(0, 15));
-}
-
-if (!APPLY) {
-  console.log('MODE_SCAN_SELESAI. Jika jumlah orang valid sudah sesuai, bersihkan data scan lama & import pasangan (1)+(2) ke dps_13 dengan:');
-  console.log('CLEAN_PREV=1 APPLY=1 node scan_folder_candidates.js');
+const files = fs.readdirSync(DATA_DIR).filter((f) => /^scan_pasfoto_/i.test(f) && !/_redbg_/i.test(f));
+if (files.length === 0) {
+  console.log('TIDAK_ADA_FILE_SCAN_PASFOTO_UNTUK_DIPROSES');
   process.exit(0);
 }
 
-const db = new Database('/root/ip555-org-vps/data/ip555.db');
-const dataDirPublic = '/root/ip555-org-vps/public/datadiri';
-fs.mkdirSync(dataDirPublic, { recursive: true });
+const db = new Database(DB_PATH);
+const updateStmt = db.prepare('UPDATE candidates SET pas_foto = ? WHERE pas_foto = ?');
 
-if (CLEAN_PREV) {
-  const oldFiles = fs.existsSync(dataDirPublic)
-    ? fs.readdirSync(dataDirPublic).filter((fn) => fn.startsWith('scan_pasfoto_') || fn.startsWith('scan_ktp_'))
-    : [];
-  db.prepare("DELETE FROM candidates WHERE id LIKE 'calon_scan_%' OR pas_foto LIKE '/datadiri/scan_%' OR foto_ktp LIKE '/datadiri/scan_%'").run();
-  for (const fn of oldFiles) {
-    try { fs.unlinkSync(path.join(dataDirPublic, fn)); } catch (_) {}
+async function processWithSharp() {
+  const sharp = require('sharp');
+  let ok = 0;
+
+  for (const fname of files) {
+    const srcPath = path.join(DATA_DIR, fname);
+    const parsed = path.parse(fname);
+    const outName = `${parsed.name}_redbg_${Date.now()}.jpg`;
+    const outPath = path.join(DATA_DIR, outName);
+
+    const { data, info } = await sharp(srcPath)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const buf = Buffer.from(data);
+    for (let i = 0; i < buf.length; i += 4) {
+      const r = buf[i];
+      const g = buf[i + 1];
+      const b = buf[i + 2];
+      const a = buf[i + 3];
+
+      const blueDiff = b - r;
+      const isBlueBg = blueDiff > 18 && b > 75 && a > 10;
+      const isSkin = r > 120 && g > 75 && r > b + 20;
+      const isDark = r < 65 && g < 65 && b < 65;
+
+      if (isBlueBg && !isSkin && !isDark) {
+        const strength = Math.min(1, Math.max(0, (blueDiff - 18) / 45));
+        const luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        const shade = Math.min(1.25, Math.max(0.65, 0.75 + 0.45 * luma));
+
+        const targetR = Math.min(255, Math.round(215 * shade));
+        const targetG = Math.min(255, Math.round(38 * shade));
+        const targetB = Math.min(255, Math.round(38 * shade));
+
+        buf[i] = Math.round(r * (1 - strength) + targetR * strength);
+        buf[i + 1] = Math.round(g * (1 - strength) + targetG * strength);
+        buf[i + 2] = Math.round(b * (1 - strength) + targetB * strength);
+      }
+    }
+
+    await sharp(buf, {
+      raw: { width: info.width, height: info.height, channels: 4 }
+    })
+      .flatten({ background: { r: 215, g: 38, b: 38 } })
+      .jpeg({ quality: 92 })
+      .toFile(outPath);
+
+    const oldUrl = `/datadiri/${fname}`;
+    const newUrl = `/datadiri/${outName}`;
+    updateStmt.run(newUrl, oldUrl);
+    ok++;
   }
-  console.log('OLD_SCAN_CLEANED:', oldFiles.length, 'files');
+
+  console.log('AUTO_REDBG_SHARP_OK', { total: files.length, converted: ok });
 }
 
-const candCols = db.prepare('PRAGMA table_info(candidates)').all().map((c) => c.name);
-const hasCreatedAt = candCols.includes('created_at');
-const hasUpdatedAt = candCols.includes('updated_at');
+function processWithFfmpeg() {
+  let ok = 0;
+  for (const fname of files) {
+    const srcPath = path.join(DATA_DIR, fname);
+    const parsed = path.parse(fname);
+    const outName = `${parsed.name}_redbg_${Date.now()}.jpg`;
+    const outPath = path.join(DATA_DIR, outName);
 
-const insertTx = db.transaction(() => {
-  validPairs.forEach((p, idx) => {
-    const stamp = Date.now() + idx;
-    const rand = Math.random().toString(36).slice(2, 6);
+    // Ganti piksel biru latar belakang menggunakan filter geq di FFmpeg
+    const geqExpr = "if(gt(b-r,18)*gt(b,75)*not(gt(r,120)*gt(g,75)*gt(r-b,20)),210,r):if(gt(b-r,18)*gt(b,75)*not(gt(r,120)*gt(g,75)*gt(r-b,20)),35,g):if(gt(b-r,18)*gt(b,75)*not(gt(r,120)*gt(g,75)*gt(r-b,20)),35,b)";
+    execSync(`ffmpeg -y -i "${srcPath}" -vf "geq='${geqExpr}'" -q:v 2 "${outPath}"`, { stdio: 'ignore' });
 
-    const ext1 = path.extname(p.pas_foto_src).toLowerCase() || '.jpg';
-    const fname1 = `scan_pasfoto_${stamp}_${rand}${ext1}`;
-    fs.copyFileSync(p.pas_foto_src, path.join(dataDirPublic, fname1));
+    const oldUrl = `/datadiri/${fname}`;
+    const newUrl = `/datadiri/${outName}`;
+    updateStmt.run(newUrl, oldUrl);
+    ok++;
+  }
+  console.log('AUTO_REDBG_FFMPEG_OK', { total: files.length, converted: ok });
+}
 
-    const ext2 = path.extname(p.foto_ktp_src).toLowerCase() || '.jpg';
-    const fname2 = `scan_ktp_${stamp}_${rand}${ext2}`;
-    fs.copyFileSync(p.foto_ktp_src, path.join(dataDirPublic, fname2));
-
-    const id = `calon_scan_${stamp}_${rand}`;
-    const nowIso = new Date().toISOString();
-
-    const rowObj = {
-      id,
-      dps_id: TARGET_DPS_ID,
-      nama: p.nama,
-      nik: '',
-      no_hp: '',
-      alamat: '',
-      usaha: '',
-      catatan: '',
-      pas_foto: `/datadiri/${fname1}`,
-      foto_ktp: `/datadiri/${fname2}`
-    };
-    if (hasCreatedAt) rowObj.created_at = nowIso;
-    if (hasUpdatedAt) rowObj.updated_at = nowIso;
-
-    const validKeys = Object.keys(rowObj).filter((k) => candCols.includes(k));
-    const placeholders = validKeys.map(() => '?').join(', ');
-    const sql = `INSERT INTO candidates (${validKeys.join(', ')}) VALUES (${placeholders})`;
-    db.prepare(sql).run(...validKeys.map((k) => rowObj[k]));
-  });
-});
-
-insertTx();
-console.log('IMPORT_VALID_PAIRS_TO_KRANGGAN_OK', {
-  inserted: validPairs.length,
-  skippedIncomplete: incompletePairs.length,
-  dps_id: TARGET_DPS_ID
-});
+(async () => {
+  try {
+    if (hasSharp) {
+      await processWithSharp();
+    } else if (hasFfmpeg) {
+      processWithFfmpeg();
+    } else {
+      console.log('SHARP_DAN_FFMPEG_BELUM_ADA. Install sharp dengan: npm install sharp');
+    }
+  } catch (err) {
+    console.error('AUTO_REDBG_ERR:', err.message);
+    process.exit(1);
+  }
+})();
 EOF
 
-APPLY=0 node scan_folder_candidates.js
+node auto_redbg_scan_nodejs.js && rm -f auto_redbg_scan_nodejs.js
